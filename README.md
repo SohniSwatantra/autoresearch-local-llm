@@ -117,4 +117,4 @@ TOTAL_BATCH_SIZE = 2**16
 - [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — original framework
 - [Qwen 3.5](https://github.com/QwenLM/Qwen3) — local LLM
 - [ollama](https://ollama.com) — local LLM serving
-- [Nosana](https://nosana.io) — decentralized GPU compute
+- [Nosana](https://nosana.com/?utm_source=reddit&utm_medium=community) - decentralized GPU compute
