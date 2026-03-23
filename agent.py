@@ -1,11 +1,11 @@
 """
-Local LLM Agent for autoresearch — replaces Claude Code with Qwen 3.5 9B via ollama.
+Local LLM Agent for autoresearch — replaces Claude Code with a local LLM via ollama.
 
-Reads program.md for experiment instructions, proposes modifications to train.py,
-validates syntax, runs experiments, and keeps/discards based on val_bpb.
-Runs entirely on a single GPU with zero API cost.
+Uses search/replace blocks instead of full file rewrites for faster, more reliable
+modifications. Proposes modifications to train.py, validates syntax, runs experiments,
+and keeps/discards based on val_bpb.
 
-Usage: python3 agent.py
+Usage: PYTHONUNBUFFERED=1 uv run python3 agent.py
 """
 
 import os
@@ -21,7 +21,7 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen3.5:9b"
+MODEL = os.environ.get("AUTORESEARCH_MODEL", "Qwen3.5:latest")
 TRAIN_SCRIPT = "train.py"
 RESULTS_FILE = "results.tsv"
 RUN_LOG = "run.log"
@@ -40,11 +40,12 @@ def query_llm(prompt, max_tokens=4096):
             "model": MODEL,
             "prompt": prompt,
             "stream": False,
+            "think": False,
             "options": {
                 "num_predict": max_tokens,
                 "temperature": 0.7,
             }
-        }, timeout=180)
+        }, timeout=600)
         if resp.ok:
             return resp.json().get("response", "")
         else:
@@ -178,7 +179,7 @@ def get_best_bpb():
 
 
 # ---------------------------------------------------------------------------
-# Code modification
+# Code modification (search/replace based)
 # ---------------------------------------------------------------------------
 
 def read_train_py():
@@ -202,14 +203,82 @@ def validate_syntax(code):
         return False, str(e)
 
 
-def extract_code_from_response(response):
-    """Extract Python code block from LLM's response."""
-    blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", response, re.DOTALL)
-    if blocks:
-        return max(blocks, key=len)
-    if "import " in response and "def " in response:
-        return response
-    return None
+def extract_hyperparams(code):
+    """Extract the hyperparameter section from train.py for the prompt."""
+    lines = code.split("\n")
+    hyper_lines = []
+    in_section = False
+    for line in lines:
+        if "Hyperparameters" in line or "# Model architecture" in line:
+            in_section = True
+        if in_section and ("Setup:" in line or "tokenizer" in line.lower()):
+            break
+        if in_section:
+            hyper_lines.append(line)
+    return "\n".join(hyper_lines) if hyper_lines else ""
+
+
+def extract_model_section(code):
+    """Extract model architecture section."""
+    lines = code.split("\n")
+    model_lines = []
+    in_section = False
+    for i, line in enumerate(lines):
+        if "GPT Model" in line or "class GPTConfig" in line:
+            in_section = True
+        if in_section:
+            model_lines.append(line)
+        if in_section and line.strip().startswith("class MuonAdamW"):
+            break
+    return "\n".join(model_lines) if model_lines else ""
+
+
+def apply_search_replace(code, search, replace):
+    """Apply a single search/replace operation. Returns (new_code, success)."""
+    if search in code:
+        return code.replace(search, replace, 1), True
+    # Try with stripped whitespace matching
+    search_stripped = "\n".join(l.rstrip() for l in search.split("\n"))
+    code_stripped = "\n".join(l.rstrip() for l in code.split("\n"))
+    if search_stripped in code_stripped:
+        return code_stripped.replace(search_stripped, replace, 1), True
+    # Try matching just the key lines (skip comment-only lines in search)
+    search_code_lines = [l for l in search.split("\n") if l.strip() and not l.strip().startswith("#")]
+    if search_code_lines:
+        first_line = search_code_lines[0].rstrip()
+        last_line = search_code_lines[-1].rstrip()
+        code_lines = code.split("\n")
+        for i, line in enumerate(code_lines):
+            if line.rstrip() == first_line:
+                for j in range(i, min(i + len(search.split("\n")) + 5, len(code_lines))):
+                    if code_lines[j].rstrip() == last_line:
+                        # Validate match span is close to expected length
+                        expected_lines = len([ln for ln in search.split("\n") if ln.strip()])
+                        actual_lines = len([ln for ln in code_lines[i:j+1] if ln.strip()])
+                        if abs(actual_lines - expected_lines) > 3:
+                            continue
+                        original_block = "\n".join(code_lines[i:j+1])
+                        return code.replace(original_block, replace, 1), True
+    return code, False
+
+
+def parse_search_replace_blocks(response):
+    """Parse SEARCH/REPLACE blocks from LLM response.
+
+    Expected format:
+    <<<SEARCH
+    old code here
+    >>>
+    <<<REPLACE
+    new code here
+    >>>
+    """
+    blocks = []
+    pattern = r'<<<SEARCH\n(.*?)>>>\s*<<<REPLACE\n(.*?)>>>'
+    matches = re.findall(pattern, response, re.DOTALL)
+    for search, replace in matches:
+        blocks.append((search.rstrip("\n"), replace.rstrip("\n")))
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -218,21 +287,33 @@ def extract_code_from_response(response):
 
 def build_experiment_prompt(train_code, results_history, best_bpb, crash_info=None):
     """Build the prompt for the LLM to propose an experiment."""
+
+    hyper_section = extract_hyperparams(train_code)
+    model_section = extract_model_section(train_code)
+
     prompt = f"""You are an autonomous ML researcher optimizing a GPT training script.
 
 GOAL: Lower val_bpb (bits per byte on validation set). Current best: {best_bpb:.6f}
 
 CONSTRAINTS:
-- Only modify train.py (the file below)
+- Only modify train.py using search/replace blocks (see format below)
 - Cannot modify prepare.py (data loading, evaluation are fixed)
 - Cannot install new packages
 - Training runs for a fixed 5-minute time budget
-- GPU has 48GB VRAM (shared with this LLM model using ~12GB)
-- Available VRAM for training: ~35GB
+- This system uses Apple Silicon MPS (128GB unified memory) or NVIDIA CUDA
+- The code auto-detects MPS vs CUDA - do NOT add device-specific code
+- Do NOT use torch.compile decorators or CUDA-specific APIs
+- Do NOT use flash-attn or kernels package (we use F.scaled_dot_product_attention)
+- TOTAL_BATCH_SIZE must be divisible by (DEVICE_BATCH_SIZE * 2048)
 
-CURRENT train.py:
-```python
-{train_code}
+HYPERPARAMETERS SECTION of train.py:
+```
+{hyper_section}
+```
+
+MODEL ARCHITECTURE of train.py:
+```
+{model_section}
 ```
 
 EXPERIMENT HISTORY:
@@ -241,21 +322,21 @@ EXPERIMENT HISTORY:
 {"LAST CRASH:" + chr(10) + crash_info if crash_info else ""}
 
 INSTRUCTIONS:
-1. Analyze the code and history
-2. Propose ONE specific modification to improve val_bpb
-3. Explain your reasoning briefly
-4. Output the COMPLETE modified train.py in a Python code block
+1. Propose ONE specific, targeted modification to improve val_bpb
+2. Explain your reasoning in 1-2 sentences
+3. Output your change as SEARCH/REPLACE blocks (copy the exact text to find, then the replacement)
 
-Focus on:
-- Model architecture (depth, width, attention patterns)
-- Optimizer hyperparameters (learning rates, betas, weight decay)
-- Batch size and gradient accumulation
-- Activation functions
-- Any other architectural innovation
+OUTPUT FORMAT — use this exact format for each change:
+<<<SEARCH
+exact lines to find in train.py
+>>>
+<<<REPLACE
+replacement lines
+>>>
 
-Be bold but practical. Small, targeted changes are often better than large rewrites.
-
-Output the complete modified train.py:"""
+You can include multiple SEARCH/REPLACE blocks if needed, but keep changes minimal.
+Focus on: depth, width, learning rates, batch size, activation functions, attention patterns.
+Be bold but practical. ONE targeted change is better than rewriting everything."""
     return prompt
 
 
@@ -310,7 +391,7 @@ def main():
         # Ask LLM for a modification
         print("  Querying LLM for experiment proposal...")
         prompt = build_experiment_prompt(train_code, results_history, best_bpb, crash_context)
-        response = query_llm(prompt, max_tokens=8192)
+        response = query_llm(prompt, max_tokens=2048)
 
         if not response:
             print("  LLM returned empty response, waiting 30s...")
@@ -318,32 +399,56 @@ def main():
             experiment_num += 1
             continue
 
-        # Extract and validate code
-        new_code = extract_code_from_response(response)
-        if not new_code:
-            print("  Could not extract code from LLM's response")
-            print(f"  Response preview: {response[:300]}...")
+        # Parse search/replace blocks
+        blocks = parse_search_replace_blocks(response)
+        if not blocks:
+            print("  Could not parse SEARCH/REPLACE blocks from response")
+            preview = response[:500].replace("\n", "\n    ")
+            print(f"    Response preview:\n    {preview}")
             experiment_num += 1
             continue
 
-        valid, error = validate_syntax(new_code)
-        if not valid:
-            print(f"  Syntax error in proposed code: {error}")
+        # Apply each search/replace block
+        modified_code = train_code
+        all_applied = True
+        for i, (search, replace) in enumerate(blocks):
+            modified_code, success = apply_search_replace(modified_code, search, replace)
+            if not success:
+                print(f"  SEARCH block {i+1} not found in train.py:")
+                print(f"    Looking for: {search[:100]}...")
+                all_applied = False
+                break
+
+        if not all_applied:
+            print("  Failed to apply changes, skipping")
             experiment_num += 1
             consecutive_crashes += 1
             if consecutive_crashes >= MAX_CONSECUTIVE_CRASHES:
-                print(f"  {MAX_CONSECUTIVE_CRASHES} consecutive failures, resetting to base...")
-                git_reset_hard(base_commit)
+                print(f"  {MAX_CONSECUTIVE_CRASHES} consecutive failures, resetting...")
                 consecutive_crashes = 0
             continue
 
-        # Apply modification
+        # Validate syntax of modified code
+        valid, error = validate_syntax(modified_code)
+        if not valid:
+            print(f"  Syntax error after applying changes: {error}")
+            experiment_num += 1
+            consecutive_crashes += 1
+            if consecutive_crashes >= MAX_CONSECUTIVE_CRASHES:
+                print(f"  {MAX_CONSECUTIVE_CRASHES} consecutive failures, resetting...")
+                consecutive_crashes = 0
+            continue
+
+        # Extract description from LLM response
         desc_lines = [l.strip() for l in response.split("\n")
-                      if l.strip() and not l.strip().startswith("```")
-                      and not l.strip().startswith("import")]
+                      if l.strip() and not l.strip().startswith("<<<")
+                      and not l.strip().startswith(">>>")
+                      and not l.strip().startswith("```")]
         description = desc_lines[0][:100] if desc_lines else f"experiment {experiment_num}"
 
-        write_train_py(new_code)
+        # Apply and commit
+        write_train_py(modified_code)
+        print(f"  Applied {len(blocks)} change(s): {description}")
         try:
             commit_hash = git_commit(f"exp{experiment_num}: {description}")
         except Exception as e:
