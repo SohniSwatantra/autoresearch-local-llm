@@ -545,7 +545,7 @@ assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
 
 optimizer = model.setup_optimizer(
-    unembedding_lr=UNEMBEDDING_LR * 2,
+    unembedding_lr=UNEMBEDDING_LR,
     embedding_lr=EMBEDDING_LR,
     scalar_lr=SCALAR_LR,
     adam_betas=ADAM_BETAS,
