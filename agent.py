@@ -25,7 +25,7 @@ MODEL = os.environ.get("AUTORESEARCH_MODEL", "qwen3:8b")
 TRAIN_SCRIPT = "train.py"
 RESULTS_FILE = "results.tsv"
 RUN_LOG = "run.log"
-RUN_TIMEOUT = 600  # 10 minutes max per experiment
+RUN_TIMEOUT = 900  # 15 minutes max per experiment
 MAX_CONSECUTIVE_CRASHES = 3
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ def query_llm(prompt, max_tokens=4096):
             "model": MODEL,
             "prompt": prompt,
             "stream": False,
+            "think": False,
             "options": {
                 "num_predict": max_tokens,
                 "temperature": 0.7,
