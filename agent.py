@@ -21,7 +21,7 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = os.environ.get("AUTORESEARCH_MODEL", "Qwen3.5:latest")
+MODEL = os.environ.get("AUTORESEARCH_MODEL", "gemma4:e4b")
 TRAIN_SCRIPT = "train.py"
 RESULTS_FILE = "results.tsv"
 RUN_LOG = "run.log"
@@ -40,7 +40,6 @@ def query_llm(prompt, max_tokens=4096):
             "model": MODEL,
             "prompt": prompt,
             "stream": False,
-            "think": False,
             "options": {
                 "num_predict": max_tokens,
                 "temperature": 0.7,
@@ -273,9 +272,13 @@ def parse_search_replace_blocks(response):
     new code here
     >>>
     """
+    # Strip markdown code fences the LLM may wrap around the blocks
+    cleaned = re.sub(r'```[a-zA-Z]*\n', '', response)
+    cleaned = re.sub(r'\n```', '', cleaned)
+
     blocks = []
     pattern = r'<<<SEARCH\n(.*?)>>>\s*<<<REPLACE\n(.*?)>>>'
-    matches = re.findall(pattern, response, re.DOTALL)
+    matches = re.findall(pattern, cleaned, re.DOTALL)
     for search, replace in matches:
         blocks.append((search.rstrip("\n"), replace.rstrip("\n")))
     return blocks
@@ -326,12 +329,20 @@ INSTRUCTIONS:
 2. Explain your reasoning in 1-2 sentences
 3. Output your change as SEARCH/REPLACE blocks (copy the exact text to find, then the replacement)
 
-OUTPUT FORMAT — use this exact format for each change:
+OUTPUT FORMAT — follow this format exactly for each change:
+
+RULES:
+- SEARCH must be a literal verbatim copy of lines from train.py — never put comments, descriptions, or placeholder text inside a SEARCH block
+- Copy the exact whitespace and indentation from train.py
+- Do NOT wrap blocks in markdown code fences (no backticks, no ```python)
+- Use one SEARCH/REPLACE pair per logical change
+
+EXAMPLE (SEARCH contains real code, not descriptions):
 <<<SEARCH
-exact lines to find in train.py
+DEVICE_BATCH_SIZE = 64   # per-device batch size
 >>>
 <<<REPLACE
-replacement lines
+DEVICE_BATCH_SIZE = 32   # reduced for stability
 >>>
 
 You can include multiple SEARCH/REPLACE blocks if needed, but keep changes minimal.
@@ -391,7 +402,7 @@ def main():
         # Ask LLM for a modification
         print("  Querying LLM for experiment proposal...")
         prompt = build_experiment_prompt(train_code, results_history, best_bpb, crash_context)
-        response = query_llm(prompt, max_tokens=2048)
+        response = query_llm(prompt, max_tokens=4096)
 
         if not response:
             print("  LLM returned empty response, waiting 30s...")
@@ -402,11 +413,29 @@ def main():
         # Parse search/replace blocks
         blocks = parse_search_replace_blocks(response)
         if not blocks:
-            print("  Could not parse SEARCH/REPLACE blocks from response")
+            print("  Could not parse SEARCH/REPLACE blocks from response — retrying with correction prompt")
             preview = response[:500].replace("\n", "\n    ")
             print(f"    Response preview:\n    {preview}")
-            experiment_num += 1
-            continue
+            correction_prompt = (
+                "Your previous response did not contain a valid SEARCH/REPLACE block.\n"
+                "Reformat your proposed change using EXACTLY this structure "
+                "(no markdown fences, no backticks):\n\n"
+                "<<<SEARCH\n"
+                "DEVICE_BATCH_SIZE = 64   # per-device batch size\n"
+                ">>>\n"
+                "<<<REPLACE\n"
+                "DEVICE_BATCH_SIZE = 32   # reduced for stability\n"
+                ">>>\n\n"
+                "Output ONLY the SEARCH/REPLACE block(s). No other text before or after.\n"
+                "SEARCH must be a verbatim copy of the lines from train.py you want to change.\n\n"
+                f"Your previous response was:\n{response[:1000]}"
+            )
+            response = query_llm(correction_prompt, max_tokens=2048)
+            blocks = parse_search_replace_blocks(response)
+            if not blocks:
+                print("  Retry also failed to produce valid blocks, skipping experiment")
+                experiment_num += 1
+                continue
 
         # Apply each search/replace block
         modified_code = train_code

@@ -478,6 +478,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 # Model size (reduced for shared VRAM — LLM agent uses ~12GB)
 DEPTH = 4               # number of transformer layers
 DEVICE_BATCH_SIZE = 64   # per-device batch size
+FINAL_EVAL_BATCH_SIZE = 32  # smaller batch for final eval to avoid OOM on 24GB
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -664,7 +665,7 @@ total_tokens = step * TOTAL_BATCH_SIZE
 # Final eval
 model.eval()
 with autocast_ctx:
-    val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
+    val_bpb = evaluate_bpb(model, tokenizer, FINAL_EVAL_BATCH_SIZE)
 
 # Final summary
 t_end = time.time()
