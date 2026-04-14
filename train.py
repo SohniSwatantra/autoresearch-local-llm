@@ -274,8 +274,8 @@ class GPT(nn.Module):
         assert len(list(self.parameters())) == (len(matrix_params) + len(embedding_params) +
             len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params))
         # Scale LR ∝ 1/√dmodel (tuned at 768 dim)
-        dmodel_lr_scale = (model_dim / 768) ** -0.5
-        print(f"Scaling AdamW LRs by 1/sqrt({model_dim}/768) = {dmodel_lr_scale:.6f}")
+        dmodel_lr_scale = (model_dim / 768) ** -0.25
+        print(f"Scaling AdamW LRs by 1/(sqrt({model_dim}/768)) = {dmodel_lr_scale:.6f}")
         param_groups = [
             dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
@@ -477,7 +477,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size (reduced for shared VRAM — LLM agent uses ~12GB)
 DEPTH = 4               # number of transformer layers
-DEVICE_BATCH_SIZE = 32   # reduced for stability
+DEVICE_BATCH_SIZE = 16   # reduced for shared memory with LLM agent
 FINAL_EVAL_BATCH_SIZE = 32  # smaller batch for final eval to avoid OOM on 24GB
 
 # ---------------------------------------------------------------------------
