@@ -311,7 +311,7 @@ CONSTRAINTS:
 - Do NOT use flash-attn or kernels package (we use F.scaled_dot_product_attention)
 - TOTAL_BATCH_SIZE must be divisible by (DEVICE_BATCH_SIZE * 2048)
 
-HYPERPARAMETERS SECTION of train.py:
+CURRENT HYPERPARAMETERS of train.py (copy SEARCH lines ONLY from here):
 ```
 {hyper_section}
 ```
@@ -321,7 +321,12 @@ MODEL ARCHITECTURE of train.py:
 {model_section}
 ```
 
-EXPERIMENT HISTORY:
+⚠️  CRITICAL: Your SEARCH block must be a verbatim copy of lines from the
+CURRENT HYPERPARAMETERS section above. Do NOT use variable names from
+EXPERIMENT HISTORY — those are descriptions of old changes, not current code.
+Do not invent variables like d_model, learning_rate, or any name not shown above.
+
+EXPERIMENT HISTORY (descriptions of past changes — NOT current code):
 {results_history}
 
 {"LAST CRASH:" + chr(10) + crash_info if crash_info else ""}
