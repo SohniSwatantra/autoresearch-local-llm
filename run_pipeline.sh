@@ -26,7 +26,7 @@ echo ""
 
 # Step 3: Start autonomous training loop
 echo "=== Step 3: Starting autonomous training agent ==="
-echo "Model: ${AUTORESEARCH_MODEL:-gemma4:e4b} via ollama"
+echo "Model: ${AUTORESEARCH_MODEL:-qwen3:8b} via ollama"
 echo "Press Ctrl+C to stop."
 echo ""
 PYTHONUNBUFFERED=1 uv run python3 agent.py

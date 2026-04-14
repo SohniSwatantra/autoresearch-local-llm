@@ -21,7 +21,7 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = os.environ.get("AUTORESEARCH_MODEL", "gemma4:e4b")
+MODEL = os.environ.get("AUTORESEARCH_MODEL", "qwen3:8b")
 TRAIN_SCRIPT = "train.py"
 RESULTS_FILE = "results.tsv"
 RUN_LOG = "run.log"
@@ -277,7 +277,8 @@ def parse_search_replace_blocks(response):
     cleaned = re.sub(r'\n```', '', cleaned)
 
     blocks = []
-    pattern = r'<<<SEARCH\n(.*?)>>>\s*<<<REPLACE\n(.*?)>>>'
+    # Accept both formats: with or without >>> between SEARCH and REPLACE
+    pattern = r'<<<SEARCH\n(.*?)(?:>>>\s*)?<<<REPLACE\n(.*?)>>>'
     matches = re.findall(pattern, cleaned, re.DOTALL)
     for search, replace in matches:
         blocks.append((search.rstrip("\n"), replace.rstrip("\n")))
@@ -336,13 +337,14 @@ RULES:
 - Copy the exact whitespace and indentation from train.py
 - Do NOT wrap blocks in markdown code fences (no backticks, no ```python)
 - Use one SEARCH/REPLACE pair per logical change
+- You MUST use >>> to close SEARCH and >>> to close REPLACE
 
-EXAMPLE (SEARCH contains real code, not descriptions):
+EXAMPLE — copy this structure exactly:
 <<<SEARCH
-DEVICE_BATCH_SIZE = 64   # per-device batch size
+DEVICE_BATCH_SIZE = 16   # reduced for shared memory with LLM agent
 >>>
 <<<REPLACE
-DEVICE_BATCH_SIZE = 32   # reduced for stability
+DEVICE_BATCH_SIZE = 8   # reduced further
 >>>
 
 You can include multiple SEARCH/REPLACE blocks if needed, but keep changes minimal.
