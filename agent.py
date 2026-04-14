@@ -420,17 +420,17 @@ def main():
             preview = response[:500].replace("\n", "\n    ")
             print(f"    Response preview:\n    {preview}")
             correction_prompt = (
-                "Your previous response did not contain a valid SEARCH/REPLACE block.\n"
-                "Reformat your proposed change using EXACTLY this structure "
-                "(no markdown fences, no backticks):\n\n"
+                "Your previous response was missing the <<<REPLACE section.\n"
+                "A complete block MUST have BOTH parts — SEARCH and REPLACE.\n"
+                "Use EXACTLY this structure (no markdown, no backticks):\n\n"
                 "<<<SEARCH\n"
-                "DEVICE_BATCH_SIZE = 64   # per-device batch size\n"
+                "<exact lines from train.py to find>\n"
                 ">>>\n"
                 "<<<REPLACE\n"
-                "DEVICE_BATCH_SIZE = 32   # reduced for stability\n"
+                "<new lines to put instead>\n"
                 ">>>\n\n"
-                "Output ONLY the SEARCH/REPLACE block(s). No other text before or after.\n"
-                "SEARCH must be a verbatim copy of the lines from train.py you want to change.\n\n"
+                "BOTH <<<SEARCH and <<<REPLACE are required. Do not output only one of them.\n"
+                "Output ONLY the block(s), no other text.\n\n"
                 f"Your previous response was:\n{response[:1000]}"
             )
             response = query_llm(correction_prompt, max_tokens=2048)
