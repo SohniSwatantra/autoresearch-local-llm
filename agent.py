@@ -290,62 +290,74 @@ def parse_search_replace_blocks(response):
 # Agent prompts
 # ---------------------------------------------------------------------------
 
+def extract_hyperparams_as_lines(code):
+    """Extract all top-level hyperparameter assignments as a clean list."""
+    lines = []
+    in_section = False
+    for line in code.split("\n"):
+        if "# Model architecture" in line or "# Optimization" in line or "# Model size" in line:
+            in_section = True
+        if in_section and line.startswith("# ---"):
+            in_section = False
+        if in_section and re.match(r'^[A-Z][A-Z_0-9]*\s*=', line):
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def build_experiment_prompt(train_code, results_history, best_bpb, crash_info=None):
     """Build the prompt for the LLM to propose an experiment."""
+
+    hyper_lines = extract_hyperparams_as_lines(train_code)
 
     prompt = f"""You are an autonomous ML researcher optimizing a GPT training script.
 
 GOAL: Lower val_bpb (bits per byte on validation set). Current best: {best_bpb:.6f}
 
+AVAILABLE HYPERPARAMETERS (current values — these are the ONLY variables you can change):
+{hyper_lines}
+
 CONSTRAINTS:
-- Only modify train.py using search/replace blocks (see format below)
-- Cannot modify prepare.py (data loading, evaluation are fixed)
-- Cannot install new packages
-- Training runs for a fixed 5-minute time budget
-- This system uses Apple Silicon MPS — do NOT add device-specific code
-- Do NOT use torch.compile decorators or CUDA-specific APIs
-- Do NOT use flash-attn or kernels package (we use F.scaled_dot_product_attention)
 - TOTAL_BATCH_SIZE must be divisible by (DEVICE_BATCH_SIZE * 2048)
+- Do NOT change FINAL_EVAL_BATCH_SIZE
+- Training runs for a fixed 5-minute budget on Apple Silicon MPS
 
-FULL CURRENT train.py (your SEARCH block must match lines from this EXACTLY):
-```python
-{train_code}
-```
-
-⚠️  CRITICAL: Copy your SEARCH text verbatim from the code above.
-Do NOT use any variable name or line that does not appear in the code above.
-
-EXPERIMENT HISTORY (past results only — NOT current code):
+EXPERIMENT HISTORY:
 {results_history}
 
 {"LAST CRASH:" + chr(10) + crash_info if crash_info else ""}
 
 INSTRUCTIONS:
-1. Propose ONE specific, targeted modification to improve val_bpb
-2. Explain your reasoning in 1-2 sentences
-3. Output your change as SEARCH/REPLACE blocks (copy the exact text to find, then the replacement)
+Pick ONE hyperparameter from the list above and propose a new value to improve val_bpb.
+Give one sentence of reasoning.
 
-OUTPUT FORMAT — follow this format exactly for each change:
-
-RULES:
-- SEARCH must be a literal verbatim copy of lines from train.py — never put comments, descriptions, or placeholder text inside a SEARCH block
-- Copy the exact whitespace and indentation from train.py
-- Do NOT wrap blocks in markdown code fences (no backticks, no ```python)
-- Use one SEARCH/REPLACE pair per logical change
-- You MUST use >>> to close SEARCH and >>> to close REPLACE
-
-EXAMPLE — copy this structure exactly:
-<<<SEARCH
-DEVICE_BATCH_SIZE = 16   # reduced for shared memory with LLM agent
->>>
-<<<REPLACE
-DEVICE_BATCH_SIZE = 8   # reduced further
->>>
-
-You can include multiple SEARCH/REPLACE blocks if needed, but keep changes minimal.
-Focus on: depth, width, learning rates, batch size, activation functions, attention patterns.
-Be bold but practical. ONE targeted change is better than rewriting everything."""
+OUTPUT: One line only, exactly like this example:
+MATRIX_LR = 0.02
+"""
     return prompt
+
+
+def parse_variable_change(response):
+    """Parse a simple VARIABLE = value assignment from LLM response."""
+    for line in response.strip().split("\n"):
+        line = re.sub(r'^[`*#\s]+|[`*#\s]+$', '', line).strip()
+        m = re.match(r'^([A-Z][A-Z_0-9]*)\s*=\s*(.+)$', line)
+        if m:
+            var_name = m.group(1)
+            new_value = m.group(2).strip().rstrip(',')
+            return var_name, new_value
+    return None, None
+
+
+def apply_variable_change(code, var_name, new_value):
+    """Replace a top-level variable assignment in train.py, preserving comments."""
+    lines = code.split("\n")
+    for i, line in enumerate(lines):
+        if re.match(rf'^{re.escape(var_name)}\s*=\s*', line):
+            comment_match = re.search(r'\s{2,}#.*$', line)
+            comment = comment_match.group(0) if comment_match else ''
+            lines[i] = f'{var_name} = {new_value}{comment}'
+            return "\n".join(lines), True
+    return code, False
 
 
 # ---------------------------------------------------------------------------
@@ -407,46 +419,23 @@ def main():
             experiment_num += 1
             continue
 
-        # Parse search/replace blocks
-        blocks = parse_search_replace_blocks(response)
-        if not blocks:
-            print("  Could not parse SEARCH/REPLACE blocks from response — retrying with correction prompt")
-            preview = response[:500].replace("\n", "\n    ")
+        # Parse variable change
+        var_name, new_value = parse_variable_change(response)
+        if not var_name:
+            print("  Could not parse VARIABLE = value from response, skipping")
+            preview = response[:300].replace("\n", "\n    ")
             print(f"    Response preview:\n    {preview}")
-            correction_prompt = (
-                "Your previous response was missing the <<<REPLACE section.\n"
-                "A complete block MUST have BOTH parts — SEARCH and REPLACE.\n"
-                "Use EXACTLY this structure (no markdown, no backticks):\n\n"
-                "<<<SEARCH\n"
-                "<exact lines from train.py to find>\n"
-                ">>>\n"
-                "<<<REPLACE\n"
-                "<new lines to put instead>\n"
-                ">>>\n\n"
-                "BOTH <<<SEARCH and <<<REPLACE are required. Do not output only one of them.\n"
-                "Output ONLY the block(s), no other text.\n\n"
-                f"Your previous response was:\n{response[:1000]}"
-            )
-            response = query_llm(correction_prompt, max_tokens=2048)
-            blocks = parse_search_replace_blocks(response)
-            if not blocks:
-                print("  Retry also failed to produce valid blocks, skipping experiment")
-                experiment_num += 1
-                continue
+            experiment_num += 1
+            consecutive_crashes += 1
+            if consecutive_crashes >= MAX_CONSECUTIVE_CRASHES:
+                print(f"  {MAX_CONSECUTIVE_CRASHES} consecutive failures, resetting...")
+                consecutive_crashes = 0
+            continue
 
-        # Apply each search/replace block
-        modified_code = train_code
-        all_applied = True
-        for i, (search, replace) in enumerate(blocks):
-            modified_code, success = apply_search_replace(modified_code, search, replace)
-            if not success:
-                print(f"  SEARCH block {i+1} not found in train.py:")
-                print(f"    Looking for: {search[:100]}...")
-                all_applied = False
-                break
-
-        if not all_applied:
-            print("  Failed to apply changes, skipping")
+        # Apply variable change
+        modified_code, success = apply_variable_change(train_code, var_name, new_value)
+        if not success:
+            print(f"  Variable '{var_name}' not found in train.py, skipping")
             experiment_num += 1
             consecutive_crashes += 1
             if consecutive_crashes >= MAX_CONSECUTIVE_CRASHES:
@@ -465,12 +454,7 @@ def main():
                 consecutive_crashes = 0
             continue
 
-        # Extract description from LLM response
-        desc_lines = [l.strip() for l in response.split("\n")
-                      if l.strip() and not l.strip().startswith("<<<")
-                      and not l.strip().startswith(">>>")
-                      and not l.strip().startswith("```")]
-        description = desc_lines[0][:100] if desc_lines else f"experiment {experiment_num}"
+        description = f"{var_name} = {new_value}"
 
         # Apply and commit
         write_train_py(modified_code)
