@@ -458,7 +458,7 @@ def main():
 
         # Apply and commit
         write_train_py(modified_code)
-        print(f"  Applied {len(blocks)} change(s): {description}")
+        print(f"  Applied: {description}")
         try:
             commit_hash = git_commit(f"exp{experiment_num}: {description}")
         except Exception as e:
