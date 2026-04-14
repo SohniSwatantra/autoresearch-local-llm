@@ -293,9 +293,6 @@ def parse_search_replace_blocks(response):
 def build_experiment_prompt(train_code, results_history, best_bpb, crash_info=None):
     """Build the prompt for the LLM to propose an experiment."""
 
-    hyper_section = extract_hyperparams(train_code)
-    model_section = extract_model_section(train_code)
-
     prompt = f"""You are an autonomous ML researcher optimizing a GPT training script.
 
 GOAL: Lower val_bpb (bits per byte on validation set). Current best: {best_bpb:.6f}
@@ -305,28 +302,20 @@ CONSTRAINTS:
 - Cannot modify prepare.py (data loading, evaluation are fixed)
 - Cannot install new packages
 - Training runs for a fixed 5-minute time budget
-- This system uses Apple Silicon MPS (128GB unified memory) or NVIDIA CUDA
-- The code auto-detects MPS vs CUDA - do NOT add device-specific code
+- This system uses Apple Silicon MPS — do NOT add device-specific code
 - Do NOT use torch.compile decorators or CUDA-specific APIs
 - Do NOT use flash-attn or kernels package (we use F.scaled_dot_product_attention)
 - TOTAL_BATCH_SIZE must be divisible by (DEVICE_BATCH_SIZE * 2048)
 
-CURRENT HYPERPARAMETERS of train.py (copy SEARCH lines ONLY from here):
-```
-{hyper_section}
-```
-
-MODEL ARCHITECTURE of train.py:
-```
-{model_section}
+FULL CURRENT train.py (your SEARCH block must match lines from this EXACTLY):
+```python
+{train_code}
 ```
 
-⚠️  CRITICAL: Your SEARCH block must be a verbatim copy of lines from the
-CURRENT HYPERPARAMETERS section above. Do NOT use variable names from
-EXPERIMENT HISTORY — those are descriptions of old changes, not current code.
-Do not invent variables like d_model, learning_rate, or any name not shown above.
+⚠️  CRITICAL: Copy your SEARCH text verbatim from the code above.
+Do NOT use any variable name or line that does not appear in the code above.
 
-EXPERIMENT HISTORY (descriptions of past changes — NOT current code):
+EXPERIMENT HISTORY (past results only — NOT current code):
 {results_history}
 
 {"LAST CRASH:" + chr(10) + crash_info if crash_info else ""}
