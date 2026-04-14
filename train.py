@@ -477,7 +477,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size (reduced for shared VRAM — LLM agent uses ~12GB)
 DEPTH = 4               # number of transformer layers
-DEVICE_BATCH_SIZE = 64   # per-device batch size
+DEVICE_BATCH_SIZE = 32   # reduced for stability
 FINAL_EVAL_BATCH_SIZE = 32  # smaller batch for final eval to avoid OOM on 24GB
 
 # ---------------------------------------------------------------------------
